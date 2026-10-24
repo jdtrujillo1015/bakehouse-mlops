@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # MLflow en Databricks, paso a paso
 # MAGIC
@@ -131,8 +135,45 @@ print(f"Run: {run.info.run_id} · accuracy {accuracy_score(y_test, pred):.3f}")
 
 # COMMAND ----------
 
-# TODO: crea el run regresion_logistica_c01 con C = 0.1, registra accuracy, f1_macro y el tag autor
+combinaciones_v2 = [
+    {"n_estimators": n, "max_depth": d, "min_samples_leaf": m}
+    for n in [10, 50, 150]
+    for d in [2, 4, None]
+    for m in [1, 5]
+]
 
+with mlflow.start_run(run_name="busqueda_random_forest_v2") as padre:
+    mlflow.set_tag("etapa", "busqueda")
+    for params in combinaciones_v2:
+        nombre = f"rf_{params['n_estimators']}_prof_{params['max_depth']}_hoja_{params['min_samples_leaf']}"
+        with mlflow.start_run(run_name=nombre, nested=True):
+            modelo = RandomForestClassifier(random_state=42, **params).fit(X_train, y_train)
+            pred = modelo.predict(X_test)
+            mlflow.log_params({"algoritmo": "RandomForest", **params})
+            mlflow.log_metric("accuracy", accuracy_score(y_test, pred))
+            mlflow.log_metric("f1_macro", f1_score(y_test, pred, average="macro"))
+
+print(f"Búsqueda terminada: {len(combinaciones_v2)} runs hijos")
+
+# COMMAND ----------
+
+with mlflow.start_run(run_name="regresion_logistica_c01") as run:
+    C = 0.1
+    modelo = make_pipeline(StandardScaler(), LogisticRegression(C=C, max_iter=1000))
+    modelo.fit(X_train, y_train)
+    pred = modelo.predict(X_test)
+
+    mlflow.log_param("algoritmo", "LogisticRegression")
+    mlflow.log_param("C", C)
+    mlflow.log_metric("accuracy", accuracy_score(y_test, pred))
+    mlflow.log_metric("f1_macro", f1_score(y_test, pred, average="macro"))
+    mlflow.set_tag("etapa", "linea_base")
+    mlflow.set_tag("autor", "JDT")
+    mlflow.log_figure(matriz_confusion(y_test, pred, "Regresión logística C=0.1"), "matriz_confusion.png")
+    mlflow.log_text("Run con regularización más fuerte (C=0.1).", "notas.txt")
+
+print(f"Run: {run.info.run_id} · accuracy {accuracy_score(y_test, pred):.3f} · "
+      f"f1_macro {f1_score(y_test, pred, average='macro'):.3f}")
 
 # COMMAND ----------
 
@@ -238,8 +279,15 @@ mlflow.sklearn.autolog(disable=True)
 runs = mlflow.search_runs(
     experiment_ids=[experimento.experiment_id],
     filter_string="params.algoritmo = 'RandomForest' AND metrics.f1_macro > 0",
-    order_by=["metrics.f1_macro DESC", "metrics.accuracy DESC"],
 )
+
+# Los parámetros vienen como texto; los pasamos a número para ordenar bien.
+runs["n_est"] = runs["params.n_estimators"].astype(int)
+runs["prof"] = pd.to_numeric(runs["params.max_depth"], errors="coerce").fillna(999)  # None = sin límite
+
+# Mejor f1 primero; en empate, menos árboles y menos profundidad.
+runs = runs.sort_values(["metrics.f1_macro", "n_est", "prof"], ascending=[False, True, True])
+
 columnas = ["tags.mlflow.runName", "params.n_estimators", "params.max_depth", "metrics.f1_macro"]
 display(runs[columnas].head(5))
 
@@ -248,7 +296,6 @@ mejores_params = {
     "n_estimators": int(mejor["params.n_estimators"]),
     "max_depth": None if mejor["params.max_depth"] == "None" else int(mejor["params.max_depth"]),
 }
-# Si hiciste el ejercicio 2, el mejor run puede traer también min_samples_leaf.
 if pd.notna(mejor.get("params.min_samples_leaf")):
     mejores_params["min_samples_leaf"] = int(mejor["params.min_samples_leaf"])
 print(f"Mejor configuración: {mejores_params} · f1_macro {mejor['metrics.f1_macro']:.3f}")
@@ -373,6 +420,17 @@ display(comparacion)
 
 # TODO: compara f1_del_alias("challenger") con f1_del_alias("champion") y mueve @champion si el challenger gana
 
+f1_champion = f1_del_alias("champion")
+f1_challenger = f1_del_alias("challenger")
+
+if f1_challenger > f1_champion:
+    cliente.set_registered_model_alias(NOMBRE_MODELO, "champion", v_gb.version)
+    print(f"Gana el challenger ({f1_challenger:.3f} > {f1_champion:.3f}): se promueve")
+else:
+    print(f"Se mantiene el champion ({f1_champion:.3f} >= {f1_challenger:.3f})")
+
+version_champion = cliente.get_model_version_by_alias(NOMBRE_MODELO, "champion").version
+print(f"@champion apunta a la versión {version_champion}")
 
 # COMMAND ----------
 
